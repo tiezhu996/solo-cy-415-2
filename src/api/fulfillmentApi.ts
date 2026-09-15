@@ -22,10 +22,20 @@ import { validateFulfillmentConfirm } from '@/utils/validators';
  * 1. 同一方重复确认、双方几乎同时确认、完成后的重试，都只收口一次；
  * 2. 双方确认记录与交换状态、两张物品状态一起落下，任一写入失败整体回滚；
  * 3. 确认记录持久化在 fulfillments 存储中，刷新后按 exchange_id 回读；
- * 4. 多个交换并发同意/确认时，经 storage 键级串行锁各自合并到最新列表，互不覆盖。
+ * 4. 多个交换并发同意/确认时，经 storage 键级串行锁各自合并到最新列表，互不覆盖；
+ * 5. 物品归属冲突：同一物品被多条已同意交换引用时，完成确认先认领物品（closing），
+ *    只有认领成功的一条能写回物品；未获得归属的交换标记 blocked 且不留完成确认记录；
+ *    认领先于收口持久化，收口写入失败时认领方保持待收口、两条交换都不进入完成态。
  */
 
 const FULFILLMENT_TX_KEYS = [STORAGE_KEYS.fulfillments, STORAGE_KEYS.exchanges, STORAGE_KEYS.items];
+
+type ClaimOutcome =
+  | { kind: 'done'; fulfillment: ExchangeFulfillment; exchange: Exchange }
+  | { kind: 'duplicate'; fulfillment: ExchangeFulfillment; exchange: Exchange }
+  | { kind: 'partial'; fulfillment: ExchangeFulfillment; exchange: Exchange }
+  | { kind: 'blocked'; fulfillment: ExchangeFulfillment; exchange: Exchange }
+  | { kind: 'finalize'; fulfillment: ExchangeFulfillment; exchange: Exchange };
 
 const randomCodeSegment = (length: number) => {
   const values = new Uint32Array(length);
@@ -64,6 +74,7 @@ const buildFulfillment = (
     created_at: now,
     updated_at: now,
     completed_at: null,
+    blocked_at: null,
   };
 };
 
@@ -71,6 +82,38 @@ const upsertFulfillment = (list: ExchangeFulfillment[], next: ExchangeFulfillmen
   const index = list.findIndex((item) => item.id === next.id);
   if (index === -1) return [next, ...list];
   return list.map((item) => (item.id === next.id ? next : item));
+};
+
+/**
+ * 物品归属检查：物品必须仍存在且可交换，且没有被其他履约单认领（closing）或完成（completed）。
+ * 返回 'missing'（物品缺失）、'conflict'（归属冲突）或 ''（可认领）。
+ */
+const findItemConflict = (
+  exchange: Exchange,
+  fulfillments: ExchangeFulfillment[],
+  exchanges: Exchange[],
+  items: Item[],
+  ownFulfillmentId: string,
+): 'missing' | 'conflict' | '' => {
+  const myItemIds = [exchange.from_item_id, exchange.to_item_id];
+  const myItems = myItemIds.map((id) => items.find((item) => item.id === id));
+  if (myItems.some((item) => item === undefined)) return 'missing';
+  if (myItems.some((item) => item && item.status !== ItemStatus.AVAILABLE)) return 'conflict';
+  const claimedByOther = fulfillments.some((fulfillment) => {
+    if (fulfillment.id === ownFulfillmentId) return false;
+    if (
+      fulfillment.status !== FulfillmentStatus.CLOSING &&
+      fulfillment.status !== FulfillmentStatus.COMPLETED
+    ) {
+      return false;
+    }
+    const claimExchange = exchanges.find((item) => item.id === fulfillment.exchange_id);
+    if (!claimExchange) return false;
+    return [claimExchange.from_item_id, claimExchange.to_item_id].some((id) =>
+      myItemIds.includes(id),
+    );
+  });
+  return claimedByOther ? 'conflict' : '';
 };
 
 export const fulfillmentApi = {
@@ -102,8 +145,8 @@ export const fulfillmentApi = {
   },
 
   async confirm(exchangeId: string, userId: string): Promise<FulfillmentConfirmResult> {
-    // 三个 key 一把事务：不同交换的确认也彼此串行，读到的永远是最新提交
-    return storage.atomic(FULFILLMENT_TX_KEYS, async (tx) => {
+    // 第一阶段：冲突检查 + 记录确认 + 认领物品（closing），或未获归属时标记受阻（blocked）
+    const claim = await storage.atomic(FULFILLMENT_TX_KEYS, async (tx): Promise<ClaimOutcome> => {
       const [fulfillments, exchanges, items] = await Promise.all([
         tx.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
         tx.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
@@ -114,9 +157,16 @@ export const fulfillmentApi = {
       const current = fulfillments.find((item) => item.exchange_id === exchangeId);
 
       // 幂等收口：已完成的交换无论重试多少次都不再变更确认记录与物品状态
-      if (exchange.status === ExchangeStatus.COMPLETED || current?.status === FulfillmentStatus.COMPLETED) {
+      if (
+        exchange.status === ExchangeStatus.COMPLETED ||
+        current?.status === FulfillmentStatus.COMPLETED
+      ) {
         if (!current) throw new Error(FULFILLMENT_MESSAGES.fulfillmentMissing);
-        return { fulfillment: current, exchange, completed: false, alreadyConfirmed: true };
+        return { kind: 'done', fulfillment: current, exchange };
+      }
+      // 已受阻的履约保持受阻，重复确认只回报冲突结果
+      if (current?.status === FulfillmentStatus.BLOCKED) {
+        return { kind: 'blocked', fulfillment: current, exchange };
       }
 
       const invalidMessage = validateFulfillmentConfirm(exchange, userId);
@@ -125,40 +175,123 @@ export const fulfillmentApi = {
       // 自愈：已同意但履约单缺失（例如同意时写入失败）时补建，履约码仍保持唯一
       const fulfillment = current ?? buildFulfillment(exchange, fulfillments);
 
+      // 已认领（双方确认已在案）：直接进入收口阶段
+      if (fulfillment.status === FulfillmentStatus.CLOSING) {
+        return { kind: 'finalize', fulfillment, exchange };
+      }
+
       // 同一方重复确认：直接返回当前状态，不产生任何写入
       if (fulfillment.confirmations.some((item) => item.user_id === userId)) {
-        return { fulfillment, exchange, completed: false, alreadyConfirmed: true };
+        return { kind: 'duplicate', fulfillment, exchange };
       }
 
       const now = new Date().toISOString();
       const role: FulfillmentRole = userId === exchange.from_user_id ? 'initiator' : 'receiver';
       const confirmation: FulfillmentConfirmation = { user_id: userId, role, confirmed_at: now };
-      const nextFulfillment: ExchangeFulfillment = {
-        ...fulfillment,
-        confirmations: [...fulfillment.confirmations, confirmation],
-        updated_at: now,
-      };
+      const nextConfirmations = [...fulfillment.confirmations, confirmation];
       const bothConfirmed = [exchange.from_user_id, exchange.to_user_id].every((partyId) =>
-        nextFulfillment.confirmations.some((item) => item.user_id === partyId),
+        nextConfirmations.some((item) => item.user_id === partyId),
       );
 
       if (!bothConfirmed) {
+        const nextFulfillment: ExchangeFulfillment = {
+          ...fulfillment,
+          confirmations: nextConfirmations,
+          updated_at: now,
+        };
         tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, nextFulfillment));
-        return { fulfillment: nextFulfillment, exchange, completed: false, alreadyConfirmed: false };
+        return { kind: 'partial', fulfillment: nextFulfillment, exchange };
       }
 
-      // 双方确认记录、交换状态、两张物品状态必须一起落下；任一失败整体回滚
-      const fromItem = items.find((item) => item.id === exchange.from_item_id);
-      const toItem = items.find((item) => item.id === exchange.to_item_id);
-      if (!fromItem || !toItem) throw new Error(FULFILLMENT_MESSAGES.itemMissing);
+      // 完成确认前先检查物品归属：只有一条交换能认领同一物品
+      const conflict = findItemConflict(exchange, fulfillments, exchanges, items, fulfillment.id);
+      if (conflict === 'missing') throw new Error(FULFILLMENT_MESSAGES.itemMissing);
+      if (conflict === 'conflict') {
+        // 未获得归属：只落受阻标记，不记录本次确认（不留半条确认记录）
+        const blockedFulfillment: ExchangeFulfillment = {
+          ...fulfillment,
+          status: FulfillmentStatus.BLOCKED,
+          blocked_at: now,
+          updated_at: now,
+        };
+        tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, blockedFulfillment));
+        return { kind: 'blocked', fulfillment: blockedFulfillment, exchange };
+      }
 
+      // 获得归属：记录双方确认并认领物品；认领独立于收口写入持久化，收口失败可安全重试
+      const closingFulfillment: ExchangeFulfillment = {
+        ...fulfillment,
+        confirmations: nextConfirmations,
+        status: FulfillmentStatus.CLOSING,
+        updated_at: now,
+      };
+      tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, closingFulfillment));
+      return { kind: 'finalize', fulfillment: closingFulfillment, exchange };
+    });
+
+    if (claim.kind === 'blocked') throw new Error(FULFILLMENT_MESSAGES.itemConflict);
+    if (claim.kind === 'done' || claim.kind === 'duplicate') {
+      return {
+        fulfillment: claim.fulfillment,
+        exchange: claim.exchange,
+        completed: false,
+        alreadyConfirmed: true,
+      };
+    }
+    if (claim.kind === 'partial') {
+      return {
+        fulfillment: claim.fulfillment,
+        exchange: claim.exchange,
+        completed: false,
+        alreadyConfirmed: false,
+      };
+    }
+
+    // 第二阶段：收口。认领（closing）已持久化，收口写入失败时认领仍保留
+    return this.finalizeClaim(claim.fulfillment.exchange_id);
+  },
+
+  /** 收口已认领的履约：交换完成 + 两张物品写回，整体原子提交 */
+  async finalizeClaim(exchangeId: string): Promise<FulfillmentConfirmResult> {
+    return storage.atomic(FULFILLMENT_TX_KEYS, async (tx) => {
+      const [fulfillments, exchanges, items] = await Promise.all([
+        tx.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
+        tx.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
+        tx.get<Item[]>(STORAGE_KEYS.items, []),
+      ]);
+      const exchange = exchanges.find((item) => item.id === exchangeId);
+      if (!exchange) throw new Error(FULFILLMENT_MESSAGES.exchangeMissing);
+      const current = fulfillments.find((item) => item.exchange_id === exchangeId);
+      if (!current) throw new Error(FULFILLMENT_MESSAGES.fulfillmentMissing);
+
+      // 并发的另一次收口已完成：幂等返回
+      if (
+        exchange.status === ExchangeStatus.COMPLETED ||
+        current.status === FulfillmentStatus.COMPLETED
+      ) {
+        return { fulfillment: current, exchange, completed: false, alreadyConfirmed: true };
+      }
+      if (current.status !== FulfillmentStatus.CLOSING) {
+        throw new Error(FULFILLMENT_MESSAGES.notReady);
+      }
+
+      // 收口前复核归属：物品被占用则保持认领，等待重试
+      const conflict = findItemConflict(exchange, fulfillments, exchanges, items, current.id);
+      if (conflict === 'missing') throw new Error(FULFILLMENT_MESSAGES.itemMissing);
+      if (conflict === 'conflict') throw new Error(FULFILLMENT_MESSAGES.itemConflict);
+
+      const now = new Date().toISOString();
       const completedFulfillment: ExchangeFulfillment = {
-        ...nextFulfillment,
+        ...current,
         status: FulfillmentStatus.COMPLETED,
         updated_at: now,
         completed_at: now,
       };
-      const nextExchange: Exchange = { ...exchange, status: ExchangeStatus.COMPLETED, updated_at: now };
+      const nextExchange: Exchange = {
+        ...exchange,
+        status: ExchangeStatus.COMPLETED,
+        updated_at: now,
+      };
       const nextItems = items.map((item) =>
         item.id === exchange.from_item_id || item.id === exchange.to_item_id
           ? { ...item, status: ItemStatus.EXCHANGED }
@@ -170,7 +303,12 @@ export const fulfillmentApi = {
         exchanges.map((item) => (item.id === exchangeId ? nextExchange : item)),
       );
       tx.set(STORAGE_KEYS.items, nextItems);
-      return { fulfillment: completedFulfillment, exchange: nextExchange, completed: true, alreadyConfirmed: false };
+      return {
+        fulfillment: completedFulfillment,
+        exchange: nextExchange,
+        completed: true,
+        alreadyConfirmed: false,
+      };
     });
   },
 };

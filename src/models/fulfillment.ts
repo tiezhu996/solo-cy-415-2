@@ -18,6 +18,8 @@ export interface ExchangeFulfillment {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  /** 归属冲突受阻时间；未受阻为 null */
+  blocked_at: string | null;
 }
 
 export interface FulfillmentConfirmResult {

@@ -29,6 +29,10 @@ export const FULFILLMENT_MESSAGES = {
   fulfillmentMissing: '履约记录不存在',
   itemMissing: '关联物品不存在，无法完成履约',
   directCompleteForbidden: '交换完成需双方在履约模块中各自确认',
+  itemConflict: '物品已被其他交换占用或已下架，本次履约无法完成',
+  blocked: '履约受阻：物品已被其他交换占用',
+  retryClose: '重试完成履约',
+  closing: '履约收口执行中',
 };
 
 export const LOG_MESSAGES = {
@@ -36,7 +40,7 @@ export const LOG_MESSAGES = {
   storageRollbackFailed: 'storage rollback failed after partial write',
   itemStatusUsed: `ItemStatus includes ${ItemStatus.AVAILABLE}, ${ItemStatus.EXCHANGED}, ${ItemStatus.OFFLINE}`,
   exchangeStatusUsed: `ExchangeStatus includes ${ExchangeStatus.PENDING}, ${ExchangeStatus.ACCEPTED}, ${ExchangeStatus.REJECTED}, ${ExchangeStatus.COMPLETED}`,
-  fulfillmentStatusUsed: `FulfillmentStatus includes ${FulfillmentStatus.CONFIRMING}, ${FulfillmentStatus.COMPLETED}`,
+  fulfillmentStatusUsed: `FulfillmentStatus includes ${FulfillmentStatus.CONFIRMING}, ${FulfillmentStatus.CLOSING}, ${FulfillmentStatus.BLOCKED}, ${FulfillmentStatus.COMPLETED}`,
 };
 
 export const STATUS_MESSAGE_MAP = {

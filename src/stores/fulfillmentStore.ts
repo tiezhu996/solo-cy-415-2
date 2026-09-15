@@ -45,6 +45,11 @@ export const useFulfillmentStore = defineStore('fulfillments', {
           message(FULFILLMENT_MESSAGES.confirmSuccess, 'success');
         }
         return result;
+      } catch (error) {
+        // 归属冲突等失败也要刷新列表：受阻（blocked）/待收口（closing）状态需要可回读
+        this.fulfillments = await fulfillmentApi.list();
+        message(error instanceof Error ? error.message : FULFILLMENT_MESSAGES.notReady, 'error');
+        return null;
       } finally {
         this.confirmingExchangeId = '';
       }

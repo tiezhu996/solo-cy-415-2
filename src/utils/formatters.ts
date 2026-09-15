@@ -29,6 +29,8 @@ export const formatExchangeStatus = (status: ExchangeStatus) => {
 export const formatFulfillmentStatus = (status: FulfillmentStatus) => {
   const map: Record<FulfillmentStatus, string> = {
     [FulfillmentStatus.CONFIRMING]: '履约确认中',
+    [FulfillmentStatus.CLOSING]: '履约收口执行中',
+    [FulfillmentStatus.BLOCKED]: '履约受阻',
     [FulfillmentStatus.COMPLETED]: '履约完成',
   };
   return map[status];
@@ -53,7 +55,13 @@ export const formatCreditLevel = (score: number) => {
 
 export const statusToneClass = (status: ItemStatus | ExchangeStatus | FulfillmentStatus) => {
   if (status === ItemStatus.AVAILABLE || status === ExchangeStatus.ACCEPTED) return 'status-good';
-  if (status === ItemStatus.OFFLINE || status === ExchangeStatus.REJECTED) return 'status-muted';
+  if (
+    status === ItemStatus.OFFLINE ||
+    status === ExchangeStatus.REJECTED ||
+    status === FulfillmentStatus.BLOCKED
+  ) {
+    return 'status-muted';
+  }
   if (
     status === ItemStatus.EXCHANGED ||
     status === ExchangeStatus.COMPLETED ||

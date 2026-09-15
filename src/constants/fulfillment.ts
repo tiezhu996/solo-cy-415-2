@@ -1,10 +1,14 @@
 export enum FulfillmentStatus {
   CONFIRMING = 'confirming',
+  CLOSING = 'closing',
+  BLOCKED = 'blocked',
   COMPLETED = 'completed',
 }
 
 export const FULFILLMENT_STATUS_OPTIONS = [
   { label: '履约确认中', value: FulfillmentStatus.CONFIRMING },
+  { label: '履约收口执行中', value: FulfillmentStatus.CLOSING },
+  { label: '履约受阻', value: FulfillmentStatus.BLOCKED },
   { label: '履约完成', value: FulfillmentStatus.COMPLETED },
 ];
 

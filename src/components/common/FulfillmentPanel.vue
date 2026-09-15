@@ -20,14 +20,17 @@
 
     <div class="fulfillment-panel__actions">
       <button
-        v-if="canConfirm"
+        v-if="canConfirm || canRetryClose"
         class="primary-button"
         type="button"
         :disabled="submitting"
         @click="$emit('confirm', exchange.id)"
       >
-        {{ submitting ? '确认中…' : '确认履约' }}
+        {{ submitting ? '确认中…' : canRetryClose ? FULFILLMENT_MESSAGES.retryClose : '确认履约' }}
       </button>
+      <span v-else-if="isBlocked" class="fulfillment-panel__hint fulfillment-panel__hint--blocked">
+        {{ FULFILLMENT_MESSAGES.blocked }}
+      </span>
       <span v-else-if="waitingForOther" class="fulfillment-panel__hint">
         {{ FULFILLMENT_MESSAGES.waitingOther }}
       </span>
@@ -90,12 +93,24 @@ const isParty = computed(
 );
 
 const isCompleted = computed(() => props.fulfillment.status === FulfillmentStatus.COMPLETED);
+const isBlocked = computed(() => props.fulfillment.status === FulfillmentStatus.BLOCKED);
+const isClosing = computed(() => props.fulfillment.status === FulfillmentStatus.CLOSING);
 
 const canConfirm = computed(
-  () => props.exchange.status === ExchangeStatus.ACCEPTED && isParty.value && !myConfirmation.value,
+  () =>
+    props.exchange.status === ExchangeStatus.ACCEPTED &&
+    isParty.value &&
+    !myConfirmation.value &&
+    !isBlocked.value &&
+    !isClosing.value,
+);
+
+/** 收口执行中（认领已持久化）：双方任一方都可重试收口 */
+const canRetryClose = computed(
+  () => props.exchange.status === ExchangeStatus.ACCEPTED && isParty.value && isClosing.value,
 );
 
 const waitingForOther = computed(
-  () => props.exchange.status === ExchangeStatus.ACCEPTED && Boolean(myConfirmation.value),
+  () => props.exchange.status === ExchangeStatus.ACCEPTED && Boolean(myConfirmation.value) && !isClosing.value,
 );
 </script>

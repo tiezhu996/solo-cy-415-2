@@ -655,6 +655,11 @@ textarea {
   font-size: 0.85rem;
 }
 
+.fulfillment-panel__hint--blocked {
+  color: var(--rs-accent);
+  font-weight: 700;
+}
+
 .profile-side {
   display: grid;
   gap: 18px;
