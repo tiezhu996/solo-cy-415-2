@@ -105,12 +105,21 @@ const canConfirm = computed(
     !isClosing.value,
 );
 
-/** 收口执行中（认领已持久化）：双方任一方都可重试收口 */
+const bothConfirmed = computed(() => parties.value.every((party) => Boolean(party.confirmation)));
+
+/** 收口执行中或认领被释放（双方确认已在案）：双方任一方都可重试收口 */
 const canRetryClose = computed(
-  () => props.exchange.status === ExchangeStatus.ACCEPTED && isParty.value && isClosing.value,
+  () =>
+    props.exchange.status === ExchangeStatus.ACCEPTED &&
+    isParty.value &&
+    (isClosing.value || (bothConfirmed.value && props.fulfillment.status === FulfillmentStatus.CONFIRMING)),
 );
 
 const waitingForOther = computed(
-  () => props.exchange.status === ExchangeStatus.ACCEPTED && Boolean(myConfirmation.value) && !isClosing.value,
+  () =>
+    props.exchange.status === ExchangeStatus.ACCEPTED &&
+    Boolean(myConfirmation.value) &&
+    !isClosing.value &&
+    !bothConfirmed.value,
 );
 </script>

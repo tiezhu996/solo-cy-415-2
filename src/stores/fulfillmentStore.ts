@@ -20,6 +20,8 @@ export const useFulfillmentStore = defineStore('fulfillments', {
     async hydrate() {
       this.loading = true;
       try {
+        // 先释放已失去完成条件的认领，再回读：刷新后看到的就是当前归属与受阻结果
+        await fulfillmentApi.releaseStaleClaims();
         this.fulfillments = await fulfillmentApi.list();
       } finally {
         this.loading = false;

@@ -25,7 +25,10 @@ import { validateFulfillmentConfirm } from '@/utils/validators';
  * 4. 多个交换并发同意/确认时，经 storage 键级串行锁各自合并到最新列表，互不覆盖；
  * 5. 物品归属冲突：同一物品被多条已同意交换引用时，完成确认先认领物品（closing），
  *    只有认领成功的一条能写回物品；未获得归属的交换标记 blocked 且不留完成确认记录；
- *    认领先于收口持久化，收口写入失败时认领方保持待收口、两条交换都不进入完成态。
+ *    认领先于收口持久化，收口写入失败时认领方保持待收口、两条交换都不进入完成态；
+ * 6. 认领释放：认领方失去完成条件（物品下架或交换不再已同意）时释放认领，
+ *    双方确认与履约码原样保留；等待中的受阻交换在归属空出后解除受阻、重新具备
+ *    完成资格，完成前仍需双方各自确认；释放与重试并发时经键级串行只产生一个有效归属。
  */
 
 const FULFILLMENT_TX_KEYS = [STORAGE_KEYS.fulfillments, STORAGE_KEYS.exchanges, STORAGE_KEYS.items];
@@ -116,6 +119,15 @@ const findItemConflict = (
   return claimedByOther ? 'conflict' : '';
 };
 
+/** 认领方是否已失去完成条件：交换不再已同意，或任一物品已不可交换（下架/被换走） */
+const hasLostCompletionCondition = (exchange: Exchange | undefined, items: Item[]) => {
+  if (!exchange || exchange.status !== ExchangeStatus.ACCEPTED) return true;
+  return [exchange.from_item_id, exchange.to_item_id].some((id) => {
+    const item = items.find((entry) => entry.id === id);
+    return !item || item.status !== ItemStatus.AVAILABLE;
+  });
+};
+
 export const fulfillmentApi = {
   async list(): Promise<ExchangeFulfillment[]> {
     return storage.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []);
@@ -144,17 +156,73 @@ export const fulfillmentApi = {
     return ensured;
   },
 
-  async confirm(exchangeId: string, userId: string): Promise<FulfillmentConfirmResult> {
-    // 第一阶段：冲突检查 + 记录确认 + 认领物品（closing），或未获归属时标记受阻（blocked）
-    const claim = await storage.atomic(FULFILLMENT_TX_KEYS, async (tx): Promise<ClaimOutcome> => {
+  /**
+   * 释放已失去完成条件的认领（closing → confirming），归属空出后解除等待方的受阻
+   * （blocked → confirming）。双方确认记录与履约码都原样保留。
+   */
+  async releaseStaleClaims(): Promise<{ released: string[]; unblocked: string[] }> {
+    return storage.atomic(FULFILLMENT_TX_KEYS, async (tx) => {
       const [fulfillments, exchanges, items] = await Promise.all([
         tx.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
         tx.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
         tx.get<Item[]>(STORAGE_KEYS.items, []),
       ]);
+      const now = new Date().toISOString();
+      let next = fulfillments;
+      const released: string[] = [];
+      const unblocked: string[] = [];
+
+      // 1) 释放：认领中的履约单失去完成条件 → 回到确认中（确认记录与履约码不动）
+      for (const fulfillment of fulfillments) {
+        if (fulfillment.status !== FulfillmentStatus.CLOSING) continue;
+        const exchange = exchanges.find((item) => item.id === fulfillment.exchange_id);
+        if (!hasLostCompletionCondition(exchange, items)) continue;
+        next = upsertFulfillment(next, {
+          ...fulfillment,
+          status: FulfillmentStatus.CONFIRMING,
+          updated_at: now,
+        });
+        released.push(fulfillment.exchange_id);
+      }
+
+      // 2) 解除受阻：物品已可用且没有其他认领/完成占用 → 回到确认中，重新具备完成资格
+      for (const fulfillment of next) {
+        if (fulfillment.status !== FulfillmentStatus.BLOCKED) continue;
+        const exchange = exchanges.find((item) => item.id === fulfillment.exchange_id);
+        if (!exchange || exchange.status !== ExchangeStatus.ACCEPTED) continue;
+        if (findItemConflict(exchange, next, exchanges, items, fulfillment.id)) continue;
+        next = upsertFulfillment(next, {
+          ...fulfillment,
+          status: FulfillmentStatus.CONFIRMING,
+          blocked_at: null,
+          updated_at: now,
+        });
+        unblocked.push(fulfillment.exchange_id);
+      }
+
+      if (released.length || unblocked.length) {
+        tx.set(STORAGE_KEYS.fulfillments, next);
+      }
+      return { released, unblocked };
+    });
+  },
+
+  async confirm(exchangeId: string, userId: string): Promise<FulfillmentConfirmResult> {
+    // 先释放已失去完成条件的认领，再处理本次确认（释放与确认经同一把键级锁串行）
+    await this.releaseStaleClaims();
+
+    // 第一阶段：冲突检查 + 记录确认 + 认领物品（closing），或未获归属时标记受阻（blocked）
+    const claim = await storage.atomic(FULFILLMENT_TX_KEYS, async (tx): Promise<ClaimOutcome> => {
+      const [fulfillmentsBefore, exchanges, items] = await Promise.all([
+        tx.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
+        tx.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
+        tx.get<Item[]>(STORAGE_KEYS.items, []),
+      ]);
+      let fulfillments = fulfillmentsBefore;
       const exchange = exchanges.find((item) => item.id === exchangeId);
       if (!exchange) throw new Error(FULFILLMENT_MESSAGES.exchangeMissing);
-      const current = fulfillments.find((item) => item.exchange_id === exchangeId);
+      let current = fulfillments.find((item) => item.exchange_id === exchangeId);
+      const now = new Date().toISOString();
 
       // 幂等收口：已完成的交换无论重试多少次都不再变更确认记录与物品状态
       if (
@@ -164,9 +232,24 @@ export const fulfillmentApi = {
         if (!current) throw new Error(FULFILLMENT_MESSAGES.fulfillmentMissing);
         return { kind: 'done', fulfillment: current, exchange };
       }
-      // 已受阻的履约保持受阻，重复确认只回报冲突结果
+
+      // 已受阻：重新评估归属是否仍被占用；归属已空出则解除受阻（确认记录与履约码保留）
       if (current?.status === FulfillmentStatus.BLOCKED) {
-        return { kind: 'blocked', fulfillment: current, exchange };
+        const stillBlocked =
+          exchange.status !== ExchangeStatus.ACCEPTED ||
+          findItemConflict(exchange, fulfillments, exchanges, items, current.id) !== '';
+        if (stillBlocked) {
+          return { kind: 'blocked', fulfillment: current, exchange };
+        }
+        const unblockedFulfillment: ExchangeFulfillment = {
+          ...current,
+          status: FulfillmentStatus.CONFIRMING,
+          blocked_at: null,
+          updated_at: now,
+        };
+        fulfillments = upsertFulfillment(fulfillments, unblockedFulfillment);
+        tx.set(STORAGE_KEYS.fulfillments, fulfillments);
+        current = unblockedFulfillment;
       }
 
       const invalidMessage = validateFulfillmentConfirm(exchange, userId);
@@ -180,12 +263,37 @@ export const fulfillmentApi = {
         return { kind: 'finalize', fulfillment, exchange };
       }
 
+      // 双方确认已在案（认领被释放后重试）：不新增确认记录，直接重新认领
+      const bothPartiesConfirmed = [exchange.from_user_id, exchange.to_user_id].every((partyId) =>
+        fulfillment.confirmations.some((item) => item.user_id === partyId),
+      );
+      if (bothPartiesConfirmed) {
+        const conflict = findItemConflict(exchange, fulfillments, exchanges, items, fulfillment.id);
+        if (conflict === 'missing') throw new Error(FULFILLMENT_MESSAGES.itemMissing);
+        if (conflict === 'conflict') {
+          const blockedFulfillment: ExchangeFulfillment = {
+            ...fulfillment,
+            status: FulfillmentStatus.BLOCKED,
+            blocked_at: now,
+            updated_at: now,
+          };
+          tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, blockedFulfillment));
+          return { kind: 'blocked', fulfillment: blockedFulfillment, exchange };
+        }
+        const closingFulfillment: ExchangeFulfillment = {
+          ...fulfillment,
+          status: FulfillmentStatus.CLOSING,
+          updated_at: now,
+        };
+        tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, closingFulfillment));
+        return { kind: 'finalize', fulfillment: closingFulfillment, exchange };
+      }
+
       // 同一方重复确认：直接返回当前状态，不产生任何写入
       if (fulfillment.confirmations.some((item) => item.user_id === userId)) {
         return { kind: 'duplicate', fulfillment, exchange };
       }
 
-      const now = new Date().toISOString();
       const role: FulfillmentRole = userId === exchange.from_user_id ? 'initiator' : 'receiver';
       const confirmation: FulfillmentConfirmation = { user_id: userId, role, confirmed_at: now };
       const nextConfirmations = [...fulfillment.confirmations, confirmation];
