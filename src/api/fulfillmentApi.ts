@@ -21,32 +21,11 @@ import { validateFulfillmentConfirm } from '@/utils/validators';
  * 履约确认收口规则（对应验收口径）：
  * 1. 同一方重复确认、双方几乎同时确认、完成后的重试，都只收口一次；
  * 2. 双方确认记录与交换状态、两张物品状态一起落下，任一写入失败整体回滚；
- * 3. 确认记录持久化在 fulfillments 存储中，刷新后按 exchange_id 回读。
+ * 3. 确认记录持久化在 fulfillments 存储中，刷新后按 exchange_id 回读；
+ * 4. 多个交换并发同意/确认时，经 storage 键级串行锁各自合并到最新列表，互不覆盖。
  */
 
-const confirmLocks = new Map<string, Promise<void>>();
-
-/** 同一交换的履约操作串行执行：内存队列管同页并发，Web Locks 管多标签页并发 */
-const runExclusive = <T>(exchangeId: string, task: () => Promise<T>): Promise<T> => {
-  const previous = confirmLocks.get(exchangeId) ?? Promise.resolve();
-  const run: Promise<T> = previous.then(async () => {
-    if (typeof navigator !== 'undefined' && navigator.locks) {
-      // await 会递归解包 thenable，类型与运行时都收敛为 T
-      return await navigator.locks.request(`reswap:fulfillment:${exchangeId}`, () => task());
-    }
-    return task();
-  });
-  const tracked = run.then(
-    () => {
-      if (confirmLocks.get(exchangeId) === tracked) confirmLocks.delete(exchangeId);
-    },
-    () => {
-      if (confirmLocks.get(exchangeId) === tracked) confirmLocks.delete(exchangeId);
-    },
-  );
-  confirmLocks.set(exchangeId, tracked);
-  return run;
-};
+const FULFILLMENT_TX_KEYS = [STORAGE_KEYS.fulfillments, STORAGE_KEYS.exchanges, STORAGE_KEYS.items];
 
 const randomCodeSegment = (length: number) => {
   const values = new Uint32Array(length);
@@ -106,28 +85,35 @@ export const fulfillmentApi = {
 
   /** 交换被同意后生成唯一履约码；同一交换重复调用只返回已有履约单 */
   async ensureForExchange(exchange: Exchange): Promise<ExchangeFulfillment> {
-    return runExclusive(exchange.id, async () => {
-      const fulfillments = await this.list();
+    let ensured: ExchangeFulfillment | undefined;
+    // 键级串行读改写：多个交换同时获同意时，各自履约单合并进最新列表，互不覆盖
+    await storage.mutate<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, [], (fulfillments) => {
       const existing = fulfillments.find((item) => item.exchange_id === exchange.id);
-      if (existing) return existing;
+      if (existing) {
+        ensured = existing;
+        return fulfillments; // 引用不变，mutate 跳过写入
+      }
       const fulfillment = buildFulfillment(exchange, fulfillments);
-      await storage.set(STORAGE_KEYS.fulfillments, [fulfillment, ...fulfillments]);
-      return fulfillment;
+      ensured = fulfillment;
+      return [fulfillment, ...fulfillments];
     });
+    if (!ensured) throw new Error(FULFILLMENT_MESSAGES.fulfillmentMissing);
+    return ensured;
   },
 
   async confirm(exchangeId: string, userId: string): Promise<FulfillmentConfirmResult> {
-    return runExclusive(exchangeId, async () => {
+    // 三个 key 一把事务：不同交换的确认也彼此串行，读到的永远是最新提交
+    return storage.atomic(FULFILLMENT_TX_KEYS, async (tx) => {
       const [fulfillments, exchanges, items] = await Promise.all([
-        storage.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
-        storage.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
-        storage.get<Item[]>(STORAGE_KEYS.items, []),
+        tx.get<ExchangeFulfillment[]>(STORAGE_KEYS.fulfillments, []),
+        tx.get<Exchange[]>(STORAGE_KEYS.exchanges, []),
+        tx.get<Item[]>(STORAGE_KEYS.items, []),
       ]);
       const exchange = exchanges.find((item) => item.id === exchangeId);
       if (!exchange) throw new Error(FULFILLMENT_MESSAGES.exchangeMissing);
       const current = fulfillments.find((item) => item.exchange_id === exchangeId);
 
-      // 幂等收口：已完成的交换无论重试多少次，都不再变更确认记录与物品状态
+      // 幂等收口：已完成的交换无论重试多少次都不再变更确认记录与物品状态
       if (exchange.status === ExchangeStatus.COMPLETED || current?.status === FulfillmentStatus.COMPLETED) {
         if (!current) throw new Error(FULFILLMENT_MESSAGES.fulfillmentMissing);
         return { fulfillment: current, exchange, completed: false, alreadyConfirmed: true };
@@ -157,7 +143,7 @@ export const fulfillmentApi = {
       );
 
       if (!bothConfirmed) {
-        await storage.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, nextFulfillment));
+        tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, nextFulfillment));
         return { fulfillment: nextFulfillment, exchange, completed: false, alreadyConfirmed: false };
       }
 
@@ -178,14 +164,12 @@ export const fulfillmentApi = {
           ? { ...item, status: ItemStatus.EXCHANGED }
           : item,
       );
-      await storage.setMany([
-        { key: STORAGE_KEYS.fulfillments, payload: upsertFulfillment(fulfillments, completedFulfillment) },
-        {
-          key: STORAGE_KEYS.exchanges,
-          payload: exchanges.map((item) => (item.id === exchangeId ? nextExchange : item)),
-        },
-        { key: STORAGE_KEYS.items, payload: nextItems },
-      ]);
+      tx.set(STORAGE_KEYS.fulfillments, upsertFulfillment(fulfillments, completedFulfillment));
+      tx.set(
+        STORAGE_KEYS.exchanges,
+        exchanges.map((item) => (item.id === exchangeId ? nextExchange : item)),
+      );
+      tx.set(STORAGE_KEYS.items, nextItems);
       return { fulfillment: completedFulfillment, exchange: nextExchange, completed: true, alreadyConfirmed: false };
     });
   },

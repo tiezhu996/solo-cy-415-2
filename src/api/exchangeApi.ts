@@ -30,7 +30,7 @@ export const exchangeApi = {
   },
 
   async create(draft: ExchangeDraft): Promise<Exchange> {
-    const exchanges = await this.list();
+    await this.list();
     const targetItem = await itemApi.detail(draft.to_item_id);
     if (!targetItem || targetItem.status !== ItemStatus.AVAILABLE) {
       throw new Error('目标物品当前不可交换');
@@ -42,35 +42,50 @@ export const exchangeApi = {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    await storage.set(STORAGE_KEYS.exchanges, [nextExchange, ...exchanges]);
+    // 键级串行写：并发发起多条请求时各自追加到最新列表，互不覆盖
+    await storage.mutate<Exchange[]>(STORAGE_KEYS.exchanges, [], (exchanges) => [
+      nextExchange,
+      ...exchanges,
+    ]);
     return nextExchange;
   },
 
   async transition(id: string, status: ExchangeStatus): Promise<Exchange> {
-    const exchanges = await this.list();
-    const current = exchanges.find((item) => item.id === id);
-    if (!current) throw new Error('交换请求不存在');
-    if (!EXCHANGE_ACTION_FLOW[current.status].includes(status)) {
-      throw new Error('当前状态不允许该操作');
-    }
-    if (status === ExchangeStatus.COMPLETED) {
-      // 完成只能由履约模块在双方各自确认后收口，禁止单边直接完成
-      throw new Error(FULFILLMENT_MESSAGES.directCompleteForbidden);
-    }
-    const nextExchange: Exchange = { ...current, status, updated_at: new Date().toISOString() };
-    await storage.set(
-      STORAGE_KEYS.exchanges,
-      exchanges.map((item) => (item.id === id ? nextExchange : item)),
-    );
+    await this.list();
+    let previousExchange: Exchange | undefined;
+    let nextExchange: Exchange | undefined;
+    // 锁内基于最新列表校验并变更：多个请求同时被处理时各自落各自的状态，互不覆盖
+    await storage.mutate<Exchange[]>(STORAGE_KEYS.exchanges, [], (exchanges) => {
+      const current = exchanges.find((item) => item.id === id);
+      if (!current) throw new Error('交换请求不存在');
+      if (!EXCHANGE_ACTION_FLOW[current.status].includes(status)) {
+        throw new Error('当前状态不允许该操作');
+      }
+      if (status === ExchangeStatus.COMPLETED) {
+        // 完成只能由履约模块在双方各自确认后收口，禁止单边直接完成
+        throw new Error(FULFILLMENT_MESSAGES.directCompleteForbidden);
+      }
+      previousExchange = current;
+      const updated: Exchange = { ...current, status, updated_at: new Date().toISOString() };
+      nextExchange = updated;
+      return exchanges.map((item) => (item.id === id ? updated : item));
+    });
+    if (!nextExchange) throw new Error('交换请求不存在');
+    const committedExchange: Exchange = nextExchange;
+
     if (status === ExchangeStatus.ACCEPTED) {
       try {
-        // 同意后生成唯一履约码；履约单落库失败时回滚同意动作，避免半成功状态
-        await fulfillmentApi.ensureForExchange(nextExchange);
+        // 同意后生成唯一履约码
+        await fulfillmentApi.ensureForExchange(committedExchange);
       } catch (error) {
-        await storage.set(STORAGE_KEYS.exchanges, exchanges);
+        // 履约单落库失败：只把本请求回滚为待确认，其他请求已成功的同意与履约单保持不变
+        const fallback = previousExchange;
+        await storage.mutate<Exchange[]>(STORAGE_KEYS.exchanges, [], (exchanges) =>
+          exchanges.map((item) => (item.id === id && fallback ? fallback : item)),
+        );
         throw error;
       }
     }
-    return nextExchange;
+    return committedExchange;
   },
 };

@@ -68,26 +68,29 @@ export const itemApi = {
   },
 
   async create(draft: ItemDraft): Promise<Item> {
-    const items = await this.list();
+    await this.list();
     const nextItem: Item = {
       ...draft,
       id: storage.createId('item'),
       status: draft.status ?? ItemStatus.AVAILABLE,
       created_at: new Date().toISOString(),
     };
-    await storage.set(STORAGE_KEYS.items, [nextItem, ...items]);
+    // 键级串行写：与履约收口共用 items 键锁，并发写入各自合并到最新列表
+    await storage.mutate<Item[]>(STORAGE_KEYS.items, [], (items) => [nextItem, ...items]);
     return nextItem;
   },
 
   async update(id: string, patch: Partial<Item>): Promise<Item> {
-    const items = await this.list();
-    const current = items.find((item) => item.id === id);
-    if (!current) throw new Error('物品不存在');
-    const nextItem = { ...current, ...patch };
-    await storage.set(
-      STORAGE_KEYS.items,
-      items.map((item) => (item.id === id ? nextItem : item)),
-    );
+    await this.list();
+    let nextItem: Item | undefined;
+    await storage.mutate<Item[]>(STORAGE_KEYS.items, [], (items) => {
+      const current = items.find((item) => item.id === id);
+      if (!current) throw new Error('物品不存在');
+      const merged: Item = { ...current, ...patch };
+      nextItem = merged;
+      return items.map((item) => (item.id === id ? merged : item));
+    });
+    if (!nextItem) throw new Error('物品不存在');
     return nextItem;
   },
 
