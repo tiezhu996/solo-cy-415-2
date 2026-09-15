@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
 
 import { ExchangeStatus } from '@/constants/exchange';
+import { FulfillmentStatus } from '@/constants/fulfillment';
 import { ItemCondition, ItemStatus } from '@/constants/item';
 import { STATUS_MESSAGE_MAP } from '@/constants/messages';
 
@@ -25,6 +26,14 @@ export const formatExchangeStatus = (status: ExchangeStatus) => {
   return map[status];
 };
 
+export const formatFulfillmentStatus = (status: FulfillmentStatus) => {
+  const map: Record<FulfillmentStatus, string> = {
+    [FulfillmentStatus.CONFIRMING]: '履约确认中',
+    [FulfillmentStatus.COMPLETED]: '履约完成',
+  };
+  return map[status];
+};
+
 export const formatCondition = (condition: ItemCondition) => {
   const map: Record<ItemCondition, string> = {
     [ItemCondition.NEW]: '全新',
@@ -42,10 +51,16 @@ export const formatCreditLevel = (score: number) => {
   return '需谨慎';
 };
 
-export const statusToneClass = (status: ItemStatus | ExchangeStatus) => {
+export const statusToneClass = (status: ItemStatus | ExchangeStatus | FulfillmentStatus) => {
   if (status === ItemStatus.AVAILABLE || status === ExchangeStatus.ACCEPTED) return 'status-good';
   if (status === ItemStatus.OFFLINE || status === ExchangeStatus.REJECTED) return 'status-muted';
-  if (status === ItemStatus.EXCHANGED || status === ExchangeStatus.COMPLETED) return 'status-done';
+  if (
+    status === ItemStatus.EXCHANGED ||
+    status === ExchangeStatus.COMPLETED ||
+    status === FulfillmentStatus.COMPLETED
+  ) {
+    return 'status-done';
+  }
   return 'status-wait';
 };
 

@@ -1,4 +1,5 @@
 import { ExchangeStatus } from './exchange';
+import { FulfillmentStatus } from './fulfillment';
 import { ItemStatus } from './item';
 
 export const PAGE_MESSAGES = {
@@ -16,10 +17,26 @@ export const FORM_MESSAGES = {
   exchangeNeedOwnItem: '请先发布一件可交换物品',
 };
 
+export const FULFILLMENT_MESSAGES = {
+  codeLabel: '履约码',
+  confirmSuccess: '已确认履约，等待对方确认',
+  confirmDuplicate: '你已确认过本次履约，无需重复操作',
+  completed: '双方确认完成，物品状态已更新',
+  waitingOther: '已确认，等待对方确认',
+  notParty: '只有交换双方可以确认履约',
+  notReady: '交换当前不在履约确认阶段',
+  exchangeMissing: '交换请求不存在',
+  fulfillmentMissing: '履约记录不存在',
+  itemMissing: '关联物品不存在，无法完成履约',
+  directCompleteForbidden: '交换完成需双方在履约模块中各自确认',
+};
+
 export const LOG_MESSAGES = {
   storageHydrated: 'storage hydrated with status maps',
+  storageRollbackFailed: 'storage rollback failed after partial write',
   itemStatusUsed: `ItemStatus includes ${ItemStatus.AVAILABLE}, ${ItemStatus.EXCHANGED}, ${ItemStatus.OFFLINE}`,
   exchangeStatusUsed: `ExchangeStatus includes ${ExchangeStatus.PENDING}, ${ExchangeStatus.ACCEPTED}, ${ExchangeStatus.REJECTED}, ${ExchangeStatus.COMPLETED}`,
+  fulfillmentStatusUsed: `FulfillmentStatus includes ${FulfillmentStatus.CONFIRMING}, ${FulfillmentStatus.COMPLETED}`,
 };
 
 export const STATUS_MESSAGE_MAP = {

@@ -1,5 +1,6 @@
 import { del, get, set } from 'idb-keyval';
 
+import { LOG_MESSAGES } from '@/constants/messages';
 import type { PersistedEnvelope } from '@/types';
 
 const STORAGE_VERSION = 1;
@@ -12,6 +13,7 @@ export const STORAGE_KEYS = {
   users: prefixed('users'),
   items: prefixed('items'),
   exchanges: prefixed('exchanges'),
+  fulfillments: prefixed('fulfillments'),
   theme: prefixed('theme'),
   lastClean: prefixed('last-clean'),
 };
@@ -75,6 +77,41 @@ export const storage = {
     localStorage.setItem(key, JSON.stringify(packed));
     await set(key, packed);
     return plainPayload;
+  },
+
+  /**
+   * 多键原子写入：任一 key 失败时按快照回滚已写入的 key，
+   * 保证「确认记录 + 交换状态 + 物品状态」这类组合写入不会只落一半。
+   */
+  async setMany(entries: Array<{ key: string; payload: unknown }>): Promise<void> {
+    const snapshots = await Promise.all(
+      entries.map(async (entry) => ({
+        key: entry.key,
+        previous: await this.get<unknown>(entry.key, null),
+      })),
+    );
+    const written: string[] = [];
+    try {
+      for (const entry of entries) {
+        // 先登记再写入：单 key 写了一半失败（localStorage 已写、IndexedDB 未写）时也能回滚
+        written.push(entry.key);
+        await this.set(entry.key, entry.payload);
+      }
+    } catch (error) {
+      for (const key of [...written].reverse()) {
+        const snapshot = snapshots.find((item) => item.key === key);
+        try {
+          if (snapshot?.previous === null || snapshot?.previous === undefined) {
+            await this.remove(key);
+          } else {
+            await this.set(key, snapshot.previous);
+          }
+        } catch (rollbackError) {
+          console.error(LOG_MESSAGES.storageRollbackFailed, rollbackError);
+        }
+      }
+      throw error;
+    }
   },
 
   async remove(key: string): Promise<void> {

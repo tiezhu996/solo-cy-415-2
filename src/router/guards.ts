@@ -5,6 +5,7 @@ import { ItemStatus } from '@/constants/item';
 import { LOG_MESSAGES } from '@/constants/messages';
 import { useAuthStore } from '@/stores/authStore';
 import { useExchangeStore } from '@/stores/exchangeStore';
+import { useFulfillmentStore } from '@/stores/fulfillmentStore';
 import { useItemStore } from '@/stores/itemStore';
 
 export const setupRouterGuards = (router: Router) => {
@@ -12,6 +13,7 @@ export const setupRouterGuards = (router: Router) => {
     const authStore = useAuthStore();
     const itemStore = useItemStore();
     const exchangeStore = useExchangeStore();
+    const fulfillmentStore = useFulfillmentStore();
     if (!authStore.currentUser) {
       await authStore.hydrate();
     }
@@ -20,6 +22,9 @@ export const setupRouterGuards = (router: Router) => {
     }
     if (!exchangeStore.exchanges.length) {
       await exchangeStore.hydrate();
+    }
+    if (!fulfillmentStore.fulfillments.length) {
+      await fulfillmentStore.hydrate();
     }
 
     const statusProbe = itemStore.items.some((item) => item.status === ItemStatus.AVAILABLE);

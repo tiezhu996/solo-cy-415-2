@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm --version)",
+      "Bash(node -e \"const fs=require\\('fs'\\);const p=JSON.parse\\(fs.readFileSync\\('/workspace/package.json','utf8'\\)\\);p.pnpm={onlyBuiltDependencies:['esbuild','vue-demi']};fs.writeFileSync\\('/workspace/package.json',JSON.stringify\\(p,null,2\\)+'\\\\n'\\)\")",
+      "Bash(rm /workspace/.npmrc)",
+      "Bash(pnpm install *)"
+    ]
+  }
+}

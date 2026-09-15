@@ -594,6 +594,67 @@ textarea {
   gap: 8px;
 }
 
+.fulfillment-panel {
+  display: grid;
+  gap: 12px;
+  border: 1px dashed var(--rs-border);
+  border-radius: 8px;
+  padding: 14px;
+  background: color-mix(in oklch, var(--rs-accent), transparent 93%);
+}
+
+.fulfillment-panel__head,
+.fulfillment-panel__code,
+.fulfillment-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fulfillment-panel__code span {
+  color: color-mix(in oklch, var(--rs-text), transparent 42%);
+  font-size: 0.8rem;
+}
+
+.fulfillment-panel__code strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.08em;
+}
+
+.fulfillment-panel__confirms {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fulfillment-panel__confirms li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-radius: 7px;
+  background: color-mix(in oklch, var(--rs-primary), transparent 90%);
+  padding: 10px 12px;
+}
+
+.fulfillment-panel__confirms li.confirmed strong {
+  color: var(--rs-primary);
+}
+
+.fulfillment-panel__confirms em {
+  color: color-mix(in oklch, var(--rs-text), transparent 40%);
+  font-style: normal;
+}
+
+.fulfillment-panel__hint {
+  color: color-mix(in oklch, var(--rs-text), transparent 35%);
+  font-size: 0.85rem;
+}
+
 .profile-side {
   display: grid;
   gap: 18px;

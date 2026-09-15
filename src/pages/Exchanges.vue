@@ -32,9 +32,11 @@
         :exchange="exchange"
         :items="itemStore.items"
         :users="authStore.users"
-        @accept="exchangeStore.accept"
+        :fulfillment="fulfillmentStore.byExchange(exchange.id)"
+        :confirming="fulfillmentStore.confirmingExchangeId === exchange.id"
+        @accept="acceptExchange"
         @reject="exchangeStore.reject"
-        @complete="completeExchange"
+        @confirm="confirmFulfillment"
       />
     </div>
     <EmptyState
@@ -47,7 +49,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 import EmptyState from '@/components/common/EmptyState.vue';
 import ExchangeCard from '@/components/common/ExchangeCard.vue';
@@ -56,11 +58,13 @@ import { PAGE_MESSAGES } from '@/constants/messages';
 import { useExchangeStats } from '@/hooks/useExchangeStats';
 import { useAuthStore } from '@/stores/authStore';
 import { useExchangeStore } from '@/stores/exchangeStore';
+import { useFulfillmentStore } from '@/stores/fulfillmentStore';
 import { useItemStore } from '@/stores/itemStore';
 
 const authStore = useAuthStore();
 const itemStore = useItemStore();
 const exchangeStore = useExchangeStore();
+const fulfillmentStore = useFulfillmentStore();
 const tab = ref<'sent' | 'received'>('sent');
 
 const mine = computed(() => {
@@ -73,10 +77,29 @@ const mine = computed(() => {
 const visibleExchanges = computed(() => mine.value);
 const stats = useExchangeStats(() => exchangeStore.exchanges);
 
-const completeExchange = async (id: string) => {
-  await exchangeStore.complete(id);
-  itemStore.items = itemStore.items.map((item) => item);
+const acceptExchange = async (id: string) => {
+  await exchangeStore.accept(id);
+  await fulfillmentStore.hydrate();
 };
 
-void ExchangeStatus.PENDING;
+const confirmFulfillment = async (id: string) => {
+  if (!authStore.currentUser) return;
+  const result = await fulfillmentStore.confirm(id, authStore.currentUser.id);
+  if (result?.completed) {
+    // 履约收口后交换状态与两张物品状态都已变更，同步刷新对应 store
+    await Promise.all([exchangeStore.hydrate(), itemStore.hydrate()]);
+  }
+};
+
+onMounted(async () => {
+  // 刷新后回读各自确认结果；历史已同意但缺履约单的交换在这里自愈补建
+  await fulfillmentStore.hydrate();
+  const missing = exchangeStore.exchanges.filter(
+    (exchange) =>
+      exchange.status === ExchangeStatus.ACCEPTED && !fulfillmentStore.byExchange(exchange.id),
+  );
+  for (const exchange of missing) {
+    await fulfillmentStore.ensureForExchange(exchange);
+  }
+});
 </script>

@@ -1,7 +1,9 @@
 import { EXCHANGE_ACTION_FLOW, ExchangeStatus } from '@/constants/exchange';
 import { ItemStatus } from '@/constants/item';
+import { FULFILLMENT_MESSAGES } from '@/constants/messages';
 import type { Exchange, ExchangeDraft } from '@/models/exchange';
 
+import { fulfillmentApi } from './fulfillmentApi';
 import { itemApi } from './itemApi';
 import { storage, STORAGE_KEYS } from '@/utils/storage';
 
@@ -51,15 +53,24 @@ export const exchangeApi = {
     if (!EXCHANGE_ACTION_FLOW[current.status].includes(status)) {
       throw new Error('当前状态不允许该操作');
     }
-    const nextExchange: Exchange = { ...current, status, updated_at: new Date().toISOString() };
     if (status === ExchangeStatus.COMPLETED) {
-      await itemApi.setStatus(current.from_item_id, ItemStatus.EXCHANGED);
-      await itemApi.setStatus(current.to_item_id, ItemStatus.EXCHANGED);
+      // 完成只能由履约模块在双方各自确认后收口，禁止单边直接完成
+      throw new Error(FULFILLMENT_MESSAGES.directCompleteForbidden);
     }
+    const nextExchange: Exchange = { ...current, status, updated_at: new Date().toISOString() };
     await storage.set(
       STORAGE_KEYS.exchanges,
       exchanges.map((item) => (item.id === id ? nextExchange : item)),
     );
+    if (status === ExchangeStatus.ACCEPTED) {
+      try {
+        // 同意后生成唯一履约码；履约单落库失败时回滚同意动作，避免半成功状态
+        await fulfillmentApi.ensureForExchange(nextExchange);
+      } catch (error) {
+        await storage.set(STORAGE_KEYS.exchanges, exchanges);
+        throw error;
+      }
+    }
     return nextExchange;
   },
 };

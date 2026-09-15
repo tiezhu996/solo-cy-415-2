@@ -37,17 +37,12 @@ export const useExchangeStore = defineStore('exchanges', {
     async accept(id: string) {
       await exchangeApi.transition(id, ExchangeStatus.ACCEPTED);
       this.exchanges = await exchangeApi.list();
-      message('已同意交换', 'success');
+      message('已同意交换，履约码已生成', 'success');
     },
     async reject(id: string) {
       await exchangeApi.transition(id, ExchangeStatus.REJECTED);
       this.exchanges = await exchangeApi.list();
       message('已拒绝交换', 'success');
-    },
-    async complete(id: string) {
-      await exchangeApi.transition(id, ExchangeStatus.COMPLETED);
-      this.exchanges = await exchangeApi.list();
-      message('交换已完成，双方物品状态已更新', 'success');
     },
   },
 });

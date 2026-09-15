@@ -16,9 +16,20 @@ ReSwap 是一个纯前端以物换物 Web 应用。用户可以本地模拟登�
 - 首页瀑布流浏览、分类筛选、关键词搜索。
 - 物品详情、物主资料、选择自己的物品发起交换。
 - 发布物品，支持本地 base64 图片上传、分类和成色选择。
-- 交换管理，区分我发起的和我收到的请求，支持同意、拒绝、完成。
+- 交换管理，区分我发起的和我收到的请求，支持同意、拒绝。
+- 交换履约：同意后生成唯一履约码，双方各自确认一次才完成交换。
 - 个人中心，编辑资料、上传头像、查看我发布的物品。
 - 主题切换、全局错误处理和 Vant 提示。
+
+## 交换履约模块
+
+履约是交换完成前的最后一道收口，代码位于 `src/api/fulfillmentApi.ts`、`src/stores/fulfillmentStore.ts`、`src/models/fulfillment.ts`、`src/constants/fulfillment.ts`、`src/components/common/FulfillmentPanel.vue`。
+
+- **唯一履约码**：交换被同意时生成 `RS-XXXX-XXXX` 履约码（去掉易混淆字符），同一交换重复生成只返回已有履约单。
+- **双方各确认一次**：发起方与接收方各自确认，双方确认记录齐全后交换才完成。
+- **幂等收口**：同一方重复确认直接返回当前状态；双方几乎同时确认时按交换串行执行（内存队列 + Web Locks），只收口一次；完成后的重试不再变更任何数据。
+- **原子落库**：双方确认记录、交换状态、两张物品状态通过 `storage.setMany` 一起写入，任一步失败按快照整体回滚，不会出现只变一边物品的情况。
+- **可回读**：确认记录持久化在 `reswap:fulfillments`，刷新后按交换回读各自确认结果。
 
 ## 启动与构建
 
@@ -49,16 +60,16 @@ pnpm build
 
 ```text
 src/
-├── api/              # userApi.ts, itemApi.ts, exchangeApi.ts：本地数据 API 层
-├── stores/           # authStore.ts, itemStore.ts, exchangeStore.ts, themeStore.ts
-├── models/           # user.ts, item.ts, exchange.ts：独立数据模型
+├── api/              # userApi.ts, itemApi.ts, exchangeApi.ts, fulfillmentApi.ts：本地数据 API 层
+├── stores/           # authStore.ts, itemStore.ts, exchangeStore.ts, fulfillmentStore.ts, themeStore.ts
+├── models/           # user.ts, item.ts, exchange.ts, fulfillment.ts：独立数据模型
 ├── types/            # 共享类型补充
 ├── components/common/# 共享业务组件和 GlobalErrorBoundary
 ├── hooks/            # useAuth.ts, useLocalStorage.ts, useExchangeStats.ts
 ├── pages/            # Home, ItemDetail, Publish, Exchanges, Profile
 ├── router/           # index.ts + guards.ts
 ├── utils/            # storage.ts, formatters.ts, validators.ts, message.ts, themeUtils.ts
-├── constants/        # item.ts, exchange.ts, themes.ts, messages.ts
+├── constants/        # item.ts, exchange.ts, fulfillment.ts, themes.ts, messages.ts
 ├── App.vue
 ├── main.ts
 └── styles.css
@@ -69,6 +80,8 @@ src/
 - `utils/storage.ts` 统一封装 localStorage 和 IndexedDB。
 - 所有 `api/*Api.ts` 通过 `storage.ts` 读写数据，不在组件里直接写业务数据。
 - 存储层包含序列化、版本号、过期清理、存储 key 管理。
+- `storage.setMany` 提供多键原子写入：任一 key 失败时按快照回滚已写入的 key，履约收口（确认记录 + 交换状态 + 两张物品）依赖它保证不会只落一半。
+- 履约数据存于 `reswap:fulfillments`，包含履约码、双方确认记录与完成时间。
 - 首次启动会写入演示用户、物品和交换请求。
 
 ## 横切关注点
@@ -105,13 +118,28 @@ src/
 - `src/models/exchange.ts`
 - `src/constants/messages.ts`
 - `src/api/exchangeApi.ts`
+- `src/api/fulfillmentApi.ts`
 - `src/stores/exchangeStore.ts`
 - `src/router/guards.ts`
 - `src/utils/formatters.ts`
+- `src/utils/validators.ts`
 - `src/hooks/useExchangeStats.ts`
 - `src/components/common/ExchangeCard.vue`
+- `src/components/common/FulfillmentPanel.vue`
 - `src/pages/ItemDetail.vue`
 - `src/pages/Exchanges.vue`
+
+### FulfillmentStatus
+
+定义位置：`src/constants/fulfillment.ts`
+
+出现位置：
+
+- `src/models/fulfillment.ts`
+- `src/constants/messages.ts`
+- `src/api/fulfillmentApi.ts`
+- `src/utils/formatters.ts`
+- `src/components/common/FulfillmentPanel.vue`
 
 ## 分层与高耦合约束
 
